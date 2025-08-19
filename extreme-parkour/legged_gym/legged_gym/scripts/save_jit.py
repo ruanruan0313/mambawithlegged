@@ -3,9 +3,9 @@ from statistics import mode
 sys.path.append("../../../rsl_rl")
 import torch
 import torch.nn as nn
-from rsl_rl.modules.actor_critic import get_activation, ActorCriticRMA
-# from rsl_rl.modules.estimator import Estimator
-# from rsl_rl.modules.depth_backbone import DepthOnlyFCBackbone58x87, RecurrentDepthBackbone
+from rsl_rl.modules.actor_critic import Actor, StateHistoryEncoder, get_activation, ActorCriticRMA
+from rsl_rl.modules.estimator import Estimator
+from rsl_rl.modules.depth_backbone import DepthOnlyFCBackbone58x87, RecurrentDepthBackbone
 import argparse
 import code
 import shutil
@@ -32,23 +32,34 @@ def get_load_path(root, load_run=-1, checkpoint=-1, model_name_include="model"):
     return load_path, checkpoint
 
 class HardwareVisionNN(nn.Module):
-    def __init__(self,  num_observations,
-                        num_privileged_obs,
+    def __init__(self,  num_prop,
+                        num_scan,
+                        num_priv_latent, 
+                        num_priv_explicit,
+                        num_hist,
                         num_actions,
                         tanh,
                         actor_hidden_dims=[512, 256, 128],
+                        scan_encoder_dims=[128, 64, 32],
+                        depth_encoder_hidden_dim=512,
                         activation='elu',
                         priv_encoder_dims=[64, 20]
                         ):
         super(HardwareVisionNN, self).__init__()
 
-        self.num_obs = num_observations
-
+        self.num_prop = num_prop
+        self.num_scan = num_scan
+        self.num_hist = num_hist
         self.num_actions = num_actions
-        self.num_priv_latent = num_privileged_obs
+        self.num_priv_latent = num_priv_latent
+        self.num_priv_explicit = num_priv_explicit
+        num_obs = num_prop + num_scan + num_hist*num_prop + num_priv_latent + num_priv_explicit
+        self.num_obs = num_obs
         activation = get_activation(activation)
-        self.actor = ActorCriticRMA(num_observations, num_actions, actor_hidden_dims, activation, tanh=tanh)
+        
+        self.actor = Actor(num_prop, num_scan, num_actions, scan_encoder_dims, actor_hidden_dims, priv_encoder_dims, num_priv_latent, num_priv_explicit, num_hist, activation, tanh_encoder_output=tanh)
 
+        self.estimator = Estimator(input_dim=num_prop, output_dim=num_priv_explicit, hidden_dims=[128, 64])
         
     def forward(self, obs, depth_latent):
         obs[:, self.num_prop+self.num_scan : self.num_prop+self.num_scan+self.num_priv_explicit] = self.estimator(obs[:, :self.num_prop])

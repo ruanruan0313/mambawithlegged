@@ -150,7 +150,10 @@ class RolloutStorage:
         privileged_obs = self.privileged_observations.flatten(0, 1)
         obs_history = self.observation_histories.flatten(0, 1)
         scan_history = self.scandots_histories.flatten(0, 1)
-        critic_observations = observations
+        if self.privileged_observations is not None:
+            critic_observations = self.privileged_observations.flatten(0, 1)
+        else:
+            critic_observations = observations
 
         actions = self.actions.flatten(0, 1)
         values = self.values.flatten(0, 1)
@@ -181,7 +184,7 @@ class RolloutStorage:
                 old_sigma_batch = old_sigma[batch_idx]
                 # env_bins_batch = old_env_bins[batch_idx]
 
-                yield (obs_batch, critic_observations_batch, privileged_obs_batch, obs_history_batch, scan_history_batch,
+                yield (obs_batch, critic_observations_batch, obs_history_batch, scan_history_batch,
                        actions_batch,
                        target_values_batch, advantages_batch, returns_batch, \
                        old_actions_log_prob_batch, old_mu_batch, old_sigma_batch, (None, None), None,)

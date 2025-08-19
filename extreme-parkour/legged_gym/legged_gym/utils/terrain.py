@@ -143,7 +143,20 @@ class Terrain:
 
             eval(terrain_type)(terrain, **self.cfg.terrain_kwargs.terrain_kwargs)
             self.add_terrain_to_map(terrain, i, j)
-    
+
+    def gap_terrain(terrain, gap_size, platform_size=1.):
+        gap_size = int(gap_size / terrain.horizontal_scale)
+        platform_size = int(platform_size / terrain.horizontal_scale)
+
+        center_x = terrain.length // 2
+        center_y = terrain.width // 2
+        x1 = (terrain.length - platform_size) // 2
+        x2 = x1 + gap_size
+        y1 = (terrain.width - platform_size) // 2
+        y2 = y1 + gap_size
+
+        terrain.height_field_raw[center_x - x2: center_x + x2, center_y - y2: center_y + y2] = -1000
+        terrain.height_field_raw[center_x - x1: center_x + x1, center_y - y1: center_y + y1] = 0
     def add_roughness(self, terrain, difficulty=1):
         max_height = (self.cfg.height[1] - self.cfg.height[0]) * difficulty + self.cfg.height[0]
         height = random.uniform(self.cfg.height[0], max_height)
@@ -156,7 +169,7 @@ class Terrain:
                                 vertical_scale=self.cfg.vertical_scale,
                                 horizontal_scale=self.cfg.horizontal_scale)
         slope = difficulty * 0.4
-        step_height = 0.02 + 0.14 * difficulty
+        step_height = 0.02 + 0.06 * difficulty
         discrete_obstacles_height = 0.03 + difficulty * 0.15
         stepping_stones_size = 1.5 * (1.05 - difficulty)
         stone_distance = 0.05 if difficulty==0 else 0.1
@@ -174,14 +187,14 @@ class Terrain:
             if choice<self.proportions[1]:
                 idx = 3
                 slope *= -1
-            terrain_utils.pyramid_sloped_terrain(terrain, slope=slope, platform_size=3.)
+            terrain_utils.pyramid_sloped_terrain(terrain, slope=slope, platform_size=1)
             self.add_roughness(terrain)
         elif choice < self.proportions[4]:
             idx = 4
             if choice<self.proportions[3]:
                 idx = 5
                 step_height *= -1
-            terrain_utils.pyramid_stairs_terrain(terrain, step_width=0.31, step_height=step_height, platform_size=3.)
+            terrain_utils.stairs_terrain(terrain, step_width=0.31, step_height=step_height)
             self.add_roughness(terrain)
         elif choice < self.proportions[5]:
             idx = 6
@@ -352,19 +365,6 @@ class Terrain:
         self.goals[i, j, :, :2] = terrain.goals + [i * self.env_length, j * self.env_width]
         # self.env_slope_vec[i, j] = terrain.slope_vector
 
-def gap_terrain(terrain, gap_size, platform_size=1.):
-    gap_size = int(gap_size / terrain.horizontal_scale)
-    platform_size = int(platform_size / terrain.horizontal_scale)
-
-    center_x = terrain.length // 2
-    center_y = terrain.width // 2
-    x1 = (terrain.length - platform_size) // 2
-    x2 = x1 + gap_size
-    y1 = (terrain.width - platform_size) // 2
-    y2 = y1 + gap_size
-   
-    terrain.height_field_raw[center_x-x2 : center_x + x2, center_y-y2 : center_y + y2] = -1000
-    terrain.height_field_raw[center_x-x1 : center_x + x1, center_y-y1 : center_y + y1] = 0
 
 def gap_parkour_terrain(terrain, difficulty, platform_size=2.):
     gap_size = 0.1 + 0.3 * difficulty
@@ -809,6 +809,25 @@ def half_platform_terrain(terrain, start2center=2, max_height=1):
     # import matplotlib.pyplot as plt
     # plt.imsave('test.png', terrain.height_field_raw, cmap='gray')
 
+def get_terrain_height_at(self, x, y):
+    """返回地形中(x, y)坐标对应的高度"""
+    # 将世界坐标转换为 heightmap 索引
+    cell_size = self.terrain.cfg.terrain.horizontal_scale  # 每格的宽度
+    origin_x = self.terrain.cfg.terrain.origin_x
+    origin_y = self.terrain.cfg.terrain.origin_y
+    heightmap = self.terrain.heights  # shape: [H, W]
+
+    # 地图索引
+    ix = int((x - origin_x) / cell_size)
+    iy = int((y - origin_y) / cell_size)
+
+    # 确保索引合法
+    ix = np.clip(ix, 0, heightmap.shape[1] - 1)
+    iy = np.clip(iy, 0, heightmap.shape[0] - 1)
+
+    height = heightmap[iy, ix] * self.terrain.cfg.terrain.vertical_scale
+    return height
+    
 def stepping_stones_terrain(terrain, stone_size, stone_distance, max_height, platform_size=1., depth=-1):
     """
     Generate a stepping stones terrain

@@ -6,13 +6,13 @@ from legged_gym.envs.base.legged_robot_config import LeggedRobotCfg, LeggedRobot
 
 class GO2RoughCfg(LeggedRobotCfg):
     class env(LeggedRobotCfg.env):
-         num_envs = 1000
+         num_envs = 1500
     class terrain(LeggedRobotCfg.terrain):
         num_cols = 40
     class depth(LeggedRobotCfg.depth):
         camera_num_envs = 150
     class init_state(LeggedRobotCfg.init_state):
-        pos = [0.0, 0.0, 0.37]  # x,y,z [m]
+        pos = [0.0, 0.0, 0.34]  # x,y,z [m]
         default_joint_angles = {  # = target angles [rad] when action = 0.0
             'FL_hip_joint': 0.1,  # [rad]
             'RL_hip_joint': 0.1,  # [rad]

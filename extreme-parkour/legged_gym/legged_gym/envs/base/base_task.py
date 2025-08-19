@@ -62,7 +62,6 @@ class BaseTask():
         self.num_obs = cfg.env.num_observations
         self.num_privileged_obs = cfg.env.num_privileged_obs
         self.num_actions = cfg.env.num_actions
-        self.num_height_points = cfg.env.num_height_points
         
         # optimization flags for pytorch JIT
         torch._C._jit_set_profiling_mode(False)
@@ -70,7 +69,6 @@ class BaseTask():
 
         # allocate buffers
         self.obs_buf = torch.zeros(self.num_envs, self.num_obs, device=self.device, dtype=torch.float)
-        self.heights = torch.zeros(self.num_envs, self.num_height_points, 3, device=self.device, dtype=torch.float)
         self.rew_buf = torch.zeros(self.num_envs, device=self.device, dtype=torch.float)
         self.reset_buf = torch.ones(self.num_envs, device=self.device, dtype=torch.long)
         self.episode_length_buf = torch.zeros(self.num_envs, device=self.device, dtype=torch.long)
@@ -128,7 +126,6 @@ class BaseTask():
     
     def get_privileged_observations(self):
         return self.privileged_obs_buf
-
     def get_scandots(self):
         return self.heights
     def reset_idx(self, env_ids):
@@ -138,7 +135,7 @@ class BaseTask():
     def reset(self):
         """ Reset all robots"""
         self.reset_idx(torch.arange(self.num_envs, device=self.device))
-        obs, _, privileged_obs, _, _, _ = self.step(torch.zeros(self.num_envs, self.num_actions, device=self.device, requires_grad=False))
+        obs, privileged_obs, _, _, _ = self.step(torch.zeros(self.num_envs, self.num_actions, device=self.device, requires_grad=False))
         return obs, privileged_obs
 
     def step(self, actions):

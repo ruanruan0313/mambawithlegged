@@ -30,7 +30,6 @@
 
 import numpy as np
 import os
-#os.environ["WANDB_MODE"] = "disabled"
 from datetime import datetime
 
 import isaacgym
@@ -41,11 +40,15 @@ import torch
 import wandb
 from legged_gym.envs.wrappers import HistoryWrapper
 
+os.environ["WANDB_BASE_URL"] = "https://api.bandw.top"
+
 def train(args):
     args.headless = True
-    log_pth = LEGGED_GYM_ROOT_DIR + "/logs/{}/".format("isaacgym") + args.exptid
-    os.makedirs(log_pth)
-
+    log_pth = LEGGED_GYM_ROOT_DIR + "/logs/{}/".format(args.proj_name) + args.exptid
+    try:
+        os.makedirs(log_pth)
+    except:
+        pass
     if args.debug:
         mode = "disabled"
         args.rows = 10
@@ -56,11 +59,9 @@ def train(args):
     
     if args.no_wandb:
         mode = "disabled"
-    wandb.init(project="isaacgym", name=args.exptid, entity="isaacgym", group=args.exptid[:3], mode=mode, dir="../../logs")
+    wandb.init(project=args.proj_name, name=args.exptid, entity="ruanruanderuan", group=args.exptid[:3], mode=mode, dir="../../logs")
     wandb.save(LEGGED_GYM_ENVS_DIR + "/base/legged_robot_config.py", policy="now")
     wandb.save(LEGGED_GYM_ENVS_DIR + "/base/legged_robot.py", policy="now")
-    # copyfile(LEGGED_GYM_ENVS_DIR + "/base/legged_robot_config.py", policy="now")
-    # copyfile(LEGGED_GYM_ENVS_DIR + "/base/legged_robot.py", policy="now")
 
     env, env_cfg = task_registry.make_env(name=args.task, args=args)
     env = HistoryWrapper(env)

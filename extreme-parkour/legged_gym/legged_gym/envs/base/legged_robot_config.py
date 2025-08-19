@@ -39,32 +39,22 @@ class LeggedRobotCfg(BaseConfig):
         mask_priv_obs = False
     class env:
         num_envs = 6144
-
         num_height_points = 132
-        n_priv = 3+3 +3
-        n_priv_latent = 4 + 1 + 12 +12
-        n_proprio = 3 + 4 + 3 + 3 + 2 + 3 + 36 + 4  + 6#  64
+        n_priv_latent = 4 + 1 + 12 +12  # 29
+        n_proprio = 44 + 12
         num_history_len = 5
 
-        num_observations = n_proprio   #根据obs重新设计
-        num_privileged_obs = n_proprio + num_height_points # if not None a priviledge_obs_buf will be returned by step() (critic obs for assymetric training). None is returned otherwise
+        num_observations = n_proprio  #n_scan + n_proprio + n_priv #187 + 47 + 5 + 12
+        num_privileged_obs = n_proprio + n_priv_latent + num_height_points # if not None a priviledge_obs_buf will be returned by step() (critic obs for assymetric training). None is returned otherwise
         num_actions = 12
         env_spacing = 3.  # not used with heightfields/trimeshes 
         send_timeouts = True # send time out information to the algorithm
         episode_length_s = 20 # episode length in seconds
         obs_type = "og"
 
-        history_encoding = False   # 不使用历史编码器
+        history_encoding = True
         reorder_dofs = True
-        
-        
-        # action_delay_range = [0, 5]
 
-        # additional visual inputs 
-
-        # action_delay_range = [0, 5]
-
-        # additional visual inputs 
         include_foot_contacts = True
         
         randomize_start_pos = False
@@ -164,13 +154,13 @@ class LeggedRobotCfg(BaseConfig):
         terrain_length = 18.
         terrain_width = 4
         num_rows= 10 # number of terrain rows (levels)  # spreaded is benifitiall !
-        num_cols = 4 # number of terrain cols (types)
+        num_cols = 40 # number of terrain cols (types)
         
         terrain_dict = {"smooth slope": 0., 
                         "rough slope up": 0.0,
                         "rough slope down": 0.0,
-                        "rough stairs up": 0., 
-                        "rough stairs down": 0., 
+                        "rough stairs up": 0.,
+                        "rough stairs down": 0,
                         "discrete": 0., 
                         "stepping stones": 0.0,
                         "gaps": 0., 
@@ -182,9 +172,9 @@ class LeggedRobotCfg(BaseConfig):
                         "large stairs down": 0.,
                         "parkour": 0.,
                         "parkour_hurdle": 0.,
-                        "parkour_flat": 1,
+                        "parkour_flat": 1.,
                         "parkour_step": 0.,
-                        "parkour_gap": 0,
+                        "parkour_gap": 0.,
                         "demo": 0.0,}
         terrain_proportions = list(terrain_dict.values())
         
@@ -212,7 +202,7 @@ class LeggedRobotCfg(BaseConfig):
 
         # Easy ranges
         class max_ranges:
-            lin_vel_x = [0.3, 0.8] # min max [m/s]
+            lin_vel_x = [0.5, 0.8] # min max [m/s]
             lin_vel_y = [-0.3, 0.3]#[0.15, 0.6]   # min max [m/s]
             ang_vel_yaw = [-0, 0]    # min max [rad/s]
             heading = [-1.6, 1.6]
@@ -226,7 +216,7 @@ class LeggedRobotCfg(BaseConfig):
         waypoint_delta = 0.7
 
     class init_state:
-        pos = [0.0, 0.0, 1.] # x,y,z [m]
+        pos = [1.0, 0.0, 1.] # x,y,z [m]
         rot = [0.0, 0.0, 0.0, 1.0] # x,y,z,w [quat]
         lin_vel = [0.0, 0.0, 0.0]  # x,y,z [m/s]
         ang_vel = [0.0, 0.0, 0.0]  # x,y,z [rad/s]
@@ -289,22 +279,24 @@ class LeggedRobotCfg(BaseConfig):
     class rewards:
         class scales:
             # tracking rewards
-            tracking_goal_vel = 1.5
+            # tracking_vel = 2
+            tracking_goal_vel = 2
+            #tracking_yaw = 0.5
             # regularization rewards
-            lin_vel_z = -1.0
+            lin_vel_z = -0.05
             ang_vel_xy = -0.05
             orientation = -1.
             dof_acc = -2.5e-7
-            collision = -10.
+            collision = -1.
             action_rate = -0.1
             delta_torques = -1.0e-7
             torques = -0.00001
-            hip_pos = -0.5
+            hip_pos = -0.1
             dof_error = -0.04
-            feet_stumble = -1
-            feet_edge = -1
+            feet_stumble = -0.1
+            feet_edge = -0.1
             
-        only_positive_rewards = True # if true negative total rewards are clipped at zero (avoids early termination problems)
+        only_positive_rewards = False # if true negative total rewards are clipped at zero (avoids early termination problems)
         tracking_sigma = 0.2 # tracking reward = exp(-error^2/sigma)
         soft_dof_pos_limit = 1. # percentage of urdf limits, values above this limit are penalized
         soft_dof_vel_limit = 1
@@ -344,14 +336,14 @@ class LeggedRobotCfg(BaseConfig):
 class LeggedRobotCfgPPO(BaseConfig):
     seed = 1
     runner_class_name = 'OnPolicyRunner'
-
+ 
     class policy:
         init_noise_std = 1.0
         continue_from_last_std = True
         scan_encoder_dims = [128, 64, 32]
         actor_hidden_dims = [512, 256, 128]
         critic_hidden_dims = [512, 256, 128]
-        priv_encoder_dims = [64, 20]
+        priv_encoder_dims = [64, 20] # 特權
         activation = 'elu' # can be elu, relu, selu, crelu, lrelu, tanh, sigmoid
         # only for 'ActorCriticRecurrent':
         rnn_type = 'lstm'
@@ -359,7 +351,7 @@ class LeggedRobotCfgPPO(BaseConfig):
         rnn_num_layers = 1
 
         tanh_encoder_output = False
-
+    
     class algorithm:
         # training params
         value_loss_coef = 1.0
@@ -378,22 +370,22 @@ class LeggedRobotCfgPPO(BaseConfig):
         dagger_update_freq = 20
         priv_reg_coef_schedual = [0, 0.1, 2000, 3000]
         priv_reg_coef_schedual_resume = [0, 0.1, 0, 1]
+    
+    class depth_encoder:
+        if_depth = LeggedRobotCfg.depth.use_camera
+        depth_shape = LeggedRobotCfg.depth.resized
+        buffer_len = LeggedRobotCfg.depth.buffer_len
+        hidden_dims = 512
+        learning_rate = 1.e-3
+        num_steps_per_env = LeggedRobotCfg.depth.update_interval * 24
 
-    # class depth_encoder:
-    #     if_depth = LeggedRobotCfg.depth.use_camera
-    #     depth_shape = LeggedRobotCfg.depth.resized
-    #     buffer_len = LeggedRobotCfg.depth.buffer_len
-    #     hidden_dims = 512
-    #     learning_rate = 1.e-3
-    #     num_steps_per_env = 24
-    #
-    # class estimator:
-    #     train_with_estimated_states = True
-    #     learning_rate = 1.e-4
-    #     hidden_dims = [128, 64]
-    #     priv_states_dim = LeggedRobotCfg.env.n_priv
-    #     num_prop = LeggedRobotCfg.env.n_proprio
-    #     num_scan = LeggedRobotCfg.env.num_height_points
+    class estimator:
+        train_with_estimated_states = True
+        learning_rate = 1.e-4
+        hidden_dims = [128, 64]
+        # priv_states_dim = LeggedRobotCfg.env.n_priv
+        num_prop = LeggedRobotCfg.env.n_proprio
+        num_scan = LeggedRobotCfg.env.num_height_points
 
     class runner:
         policy_class_name = 'ActorCritic'

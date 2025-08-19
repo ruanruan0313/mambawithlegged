@@ -59,127 +59,164 @@ class OnPolicyRunner:
         self.cfg=train_cfg["runner"]
         self.alg_cfg = train_cfg["algorithm"]
         self.policy_cfg = train_cfg["policy"]
+        self.estimator_cfg = train_cfg["estimator"]
+        self.depth_encoder_cfg = train_cfg["depth_encoder"]
         self.device = device
         self.env = env
 
         print("Using MLP and Priviliged Env encoder ActorCritic structure")
-        actor_critic: ActorCriticRMA = ActorCriticRMA(self.env.cfg.env.num_observations,
-                                                      self.env.cfg.env.num_privileged_obs,  #用于非对称critic输出
+        actor_critic: ActorCriticRMA = ActorCriticRMA(self.env.cfg.env.n_proprio,
+                                                      self.env.cfg.env.num_height_points,
+                                                      self.env.cfg.env.num_privileged_obs,
+                                                      self.env.cfg.env.n_priv_latent,
+                                                      # self.env.cfg.env.n_priv,
+                                                      self.env.cfg.env.num_history_len,
                                                       self.env.num_actions,
                                                       **self.policy_cfg).to(self.device)
+        # estimator 預測軀幹位置 \足端位置
+        estimator = Estimator(input_dim=env.cfg.env.num_height_points + 12, output_dim=12, hidden_dims=self.estimator_cfg["hidden_dims"]).to(self.device)
+
+        # Create algorithm
         alg_class = eval(self.cfg["algorithm_class_name"]) # PPO
-        self.alg: PPO = alg_class(actor_critic,
+        self.alg: PPO = alg_class(actor_critic, 
+                                  estimator, self.estimator_cfg,
                                   device=self.device, **self.alg_cfg)
         self.num_steps_per_env = self.cfg["num_steps_per_env"]
         self.save_interval = self.cfg["save_interval"]
         self.dagger_update_freq = self.alg_cfg["dagger_update_freq"]
 
-        # 需要重新构建训练batch
         self.alg.init_storage(
-            self.env.num_envs,
-            self.num_steps_per_env,
-            [self.env.num_obs],
+            self.env.num_envs, 
+            self.num_steps_per_env, 
+            [self.env.num_obs], 
             [self.env.num_privileged_obs],
             self.env.obs_history_length,
             [self.env.num_obs],
-            [self.env.num_height_points],
+            [self.env.num_height_points + 12],
             [self.env.num_actions],
-
         )
 
-        self.learn = self.learn_mamba
+        self.learn = self.learn_RL
+            
         # Log
         self.log_dir = log_dir
         self.writer = None
         self.tot_timesteps = 0
         self.tot_time = 0
         self.current_learning_iteration = 0
+        
 
-    def learn_mamba(self, num_learning_iterations, init_at_random_ep_len=False):
-
-        # 初始化统计变量
-        ep_infos = []
-        rewbuffer = deque(maxlen=100)
-        lenbuffer = deque(maxlen=100)
-        cur_reward_sum = torch.zeros(self.env.num_envs, dtype=torch.float, device=self.device)
-        cur_episode_length = torch.zeros(self.env.num_envs, dtype=torch.float, device=self.device)
+    def learn_RL(self, num_learning_iterations, init_at_random_ep_len=False):
+        mean_value_loss = 0.
+        mean_surrogate_loss = 0.
+        mean_estimator_loss = 0.
+        mean_disc_loss = 0.
+        mean_disc_acc = 0.
+        mean_hist_latent_loss = 0.
+        mean_priv_reg_loss = 0. 
+        priv_reg_coef = 0.
+        entropy_coef = 0.
+        # initialize writer
+        # if self.log_dir is not None and self.writer is None:
+        #     self.writer = SummaryWriter(log_dir=self.log_dir, flush_secs=10)
+        if init_at_random_ep_len:
+            self.env.episode_length_buf = torch.randint_like(self.env.episode_length_buf, high=int(self.env.max_episode_length))
 
         obs_dict = self.env.get_observations()
+
         obs = obs_dict["obs"].to(self.device)
-        privileged_obs = obs_dict["privileged_obs"].to(self.device)
+        privileged_obs = obs_dict["privileged_obs"]
         obs_history = obs_dict["obs_history"].to(self.device)
         scandots_history = obs_dict["scandots_history"].to(self.device)
-        infos = {}
 
-        self.alg.actor_critic.train()
+        critic_obs = privileged_obs if privileged_obs is not None else obs
+        obs, critic_obs = obs.to(self.device), critic_obs.to(self.device)
+        infos = {}
+        # infos["depth"] = self.env.depth_buffer.clone().to(self.device) if self.if_depth else None
+        self.alg.actor_critic.train() # switch to train mode (for dropout for example)
+
+        ep_infos = []
+        rewbuffer = deque(maxlen=100)
+        rew_explr_buffer = deque(maxlen=100)
+        rew_entropy_buffer = deque(maxlen=100)
+        lenbuffer = deque(maxlen=100)
+        cur_reward_sum = torch.zeros(self.env.num_envs, dtype=torch.float, device=self.device)
+        cur_reward_explr_sum = torch.zeros(self.env.num_envs, dtype=torch.float, device=self.device)
+        cur_reward_entropy_sum = torch.zeros(self.env.num_envs, dtype=torch.float, device=self.device)
+        cur_episode_length = torch.zeros(self.env.num_envs, dtype=torch.float, device=self.device)
 
         tot_iter = self.current_learning_iteration + num_learning_iterations
         self.start_learning_iteration = copy(self.current_learning_iteration)
+
         for it in range(self.current_learning_iteration, tot_iter):
             start = time.time()
-            # depth_image_buffer = []  # 存储历史图像，不一定需要
-            # scandots_buffer = []
+            hist_encoding = it % self.dagger_update_freq == 0
+
+            # Rollout
             with torch.inference_mode():
                 for i in range(self.num_steps_per_env):
-                    # pri_root = privileged_obs[:, 0, :].unsqueeze(1) # 过mamba和gru的输出
-                    action = self.alg.act(obs, privileged_obs, obs_history, scandots_history)
-                    obs_dict, rewards, dones, infos = self.env.step(action)
+                    actions = self.alg.act(obs, critic_obs, obs_history, scandots_history, hist_encoding)
+                    obs_dict, rewards, dones, infos = self.env.step(actions)
                     obs = obs_dict["obs"].to(self.device)
-                    privileged_obs = obs_dict["privileged_obs"].to(self.device)
+                    privileged_obs = obs_dict["privileged_obs"]
+                    critic_obs = privileged_obs if privileged_obs is not None else obs
+                    critic_obs = critic_obs.to(self.device)
                     obs_history = obs_dict["obs_history"].to(self.device)
                     scandots_history = obs_dict["scandots_history"].to(self.device)
                     rewards = rewards.to(self.device)
                     dones = dones.to(self.device)
 
-                    # 更新env状态,奖励处理
                     total_rew = self.alg.process_env_step(rewards, dones, infos)
-
+                    
                     if self.log_dir is not None:
                         # Book keeping
                         if 'episode' in infos:
                             ep_infos.append(infos['episode'])
                         cur_reward_sum += total_rew
-                        # cur_reward_explr_sum += 0
-                        # cur_reward_entropy_sum += 0
+                        cur_reward_explr_sum += 0
+                        cur_reward_entropy_sum += 0
                         cur_episode_length += 1
+                        
                         new_ids = (dones > 0).nonzero(as_tuple=False)
+                        
                         rewbuffer.extend(cur_reward_sum[new_ids][:, 0].cpu().numpy().tolist())
-                        #rew_explr_buffer.extend(cur_reward_explr_sum[new_ids][:, 0].cpu().numpy().tolist())
-                        #rew_entropy_buffer.extend(cur_reward_entropy_sum[new_ids][:, 0].cpu().numpy().tolist())
+                        rew_explr_buffer.extend(cur_reward_explr_sum[new_ids][:, 0].cpu().numpy().tolist())
+                        rew_entropy_buffer.extend(cur_reward_entropy_sum[new_ids][:, 0].cpu().numpy().tolist())
                         lenbuffer.extend(cur_episode_length[new_ids][:, 0].cpu().numpy().tolist())
+                        
                         cur_reward_sum[new_ids] = 0
-                        # cur_reward_explr_sum[new_ids] = 0
-                        # cur_reward_entropy_sum[new_ids] = 0
+                        cur_reward_explr_sum[new_ids] = 0
+                        cur_reward_entropy_sum[new_ids] = 0
                         cur_episode_length[new_ids] = 0
 
-                collection_time = time.time() - start
+                stop = time.time()
+                collection_time = stop - start
 
-            # Actor学习
-            start = time.time()
-            self.alg.compute_returns(privileged_obs)
-            mean_value_loss, mean_surrogate_loss = self.alg.update()
-            learn_time = time.time() - start
-
-            # 日志记录
+                # Learning step
+                start = stop
+                self.alg.compute_returns(critic_obs)
+            
+            mean_value_loss, mean_surrogate_loss, mean_estimator_loss, mean_disc_loss, mean_disc_acc, mean_priv_reg_loss, priv_reg_coef = self.alg.update()
+            if hist_encoding:
+                print("Updating dagger...")
+                mean_hist_latent_loss = self.alg.update_dagger()
+            
+            stop = time.time()
+            learn_time = stop - start
             if self.log_dir is not None:
                 self.log(locals())
-
-            # 模型保存策略
             if it < 2500:
                 if it % self.save_interval == 0:
-                    self.save(os.path.join(self.log_dir, f'model_{it}.pt'))
+                    self.save(os.path.join(self.log_dir, 'model_{}.pt'.format(it)))
             elif it < 5000:
-                if it % (2 * self.save_interval) == 0:
-                    self.save(os.path.join(self.log_dir, f'model_{it}.pt'))
+                if it % (2*self.save_interval) == 0:
+                    self.save(os.path.join(self.log_dir, 'model_{}.pt'.format(it)))
             else:
-                if it % (5 * self.save_interval) == 0:
-                    self.save(os.path.join(self.log_dir, f'model_{it}.pt'))
-
+                if it % (5*self.save_interval) == 0:
+                    self.save(os.path.join(self.log_dir, 'model_{}.pt'.format(it)))
             ep_infos.clear()
-
-        self.current_learning_iteration += num_learning_iterations
-        self.save(os.path.join(self.log_dir, f'model_{self.current_learning_iteration}.pt'))
-
+        # self.current_learning_iteration += num_learning_iterations
+        self.save(os.path.join(self.log_dir, 'model_{}.pt'.format(self.current_learning_iteration)))
 
     def log(self, locs, width=80, pad=35):
         self.tot_timesteps += self.num_steps_per_env * self.env.num_envs
@@ -206,6 +243,14 @@ class OnPolicyRunner:
 
         wandb_dict['Loss/value_function'] = ['mean_value_loss']
         wandb_dict['Loss/surrogate'] = locs['mean_surrogate_loss']
+        wandb_dict['Loss/estimator'] = locs['mean_estimator_loss']
+        wandb_dict['Loss/hist_latent_loss'] = locs['mean_hist_latent_loss']
+        wandb_dict['Loss/priv_reg_loss'] = locs['mean_priv_reg_loss']
+        wandb_dict['Loss/priv_ref_lambda'] = locs['priv_reg_coef']
+        wandb_dict['Loss/entropy_coef'] = locs['entropy_coef']
+        wandb_dict['Loss/learning_rate'] = self.alg.learning_rate
+        wandb_dict['Loss/discriminator'] = locs['mean_disc_loss']
+        wandb_dict['Loss/discriminator_accuracy'] = locs['mean_disc_acc']
 
         wandb_dict['Policy/mean_noise_std'] = mean_std.item()
         wandb_dict['Perf/total_fps'] = fps
@@ -213,8 +258,12 @@ class OnPolicyRunner:
         wandb_dict['Perf/learning_time'] = locs['learn_time']
         if len(locs['rewbuffer']) > 0:
             wandb_dict['Train/mean_reward'] = statistics.mean(locs['rewbuffer'])
+            wandb_dict['Train/mean_reward_explr'] = statistics.mean(locs['rew_explr_buffer'])
+            wandb_dict['Train/mean_reward_task'] = wandb_dict['Train/mean_reward'] - wandb_dict['Train/mean_reward_explr']
+            wandb_dict['Train/mean_reward_entropy'] = statistics.mean(locs['rew_entropy_buffer'])
             wandb_dict['Train/mean_episode_length'] = statistics.mean(locs['lenbuffer'])
-
+            # wandb_dict['Train/mean_reward/time', statistics.mean(locs['rewbuffer']), self.tot_time)
+            # wandb_dict['Train/mean_episode_length/time', statistics.mean(locs['lenbuffer']), self.tot_time)
 
         wandb.log(wandb_dict, step=locs['it'])
 
@@ -227,10 +276,16 @@ class OnPolicyRunner:
                             'collection_time']:.3f}s, learning {locs['learn_time']:.3f}s)\n"""
                           f"""{'Value function loss:':>{pad}} {locs['mean_value_loss']:.4f}\n"""
                           f"""{'Surrogate loss:':>{pad}} {locs['mean_surrogate_loss']:.4f}\n"""
+                          f"""{'Discriminator loss:':>{pad}} {locs['mean_disc_loss']:.4f}\n"""
+                          f"""{'Discriminator accuracy:':>{pad}} {locs['mean_disc_acc']:.4f}\n"""
                           f"""{'Mean action noise std:':>{pad}} {mean_std.item():.2f}\n"""
                           f"""{'Mean reward (total):':>{pad}} {statistics.mean(locs['rewbuffer']):.2f}\n"""
+                          f"""{'Mean reward (task):':>{pad}} {statistics.mean(locs['rewbuffer']) - statistics.mean(locs['rew_explr_buffer']):.2f}\n"""
+                          f"""{'Mean reward (exploration):':>{pad}} {statistics.mean(locs['rew_explr_buffer']):.2f}\n"""
+                          f"""{'Mean reward (entropy):':>{pad}} {statistics.mean(locs['rew_entropy_buffer']):.2f}\n"""
                           f"""{'Mean episode length:':>{pad}} {statistics.mean(locs['lenbuffer']):.2f}\n""")
-
+                        #   f"""{'Mean reward/step:':>{pad}} {locs['mean_reward']:.2f}\n"""
+                        #   f"""{'Mean episode length/episode:':>{pad}} {locs['mean_trajectory_length']:.2f}\n""")
         else:
             log_string = (f"""{'#' * width}\n"""
                           f"""{str.center(width, ' ')}\n\n"""
@@ -238,8 +293,10 @@ class OnPolicyRunner:
                             'collection_time']:.3f}s, learning {locs['learn_time']:.3f}s)\n"""
                           f"""{'Value function loss:':>{pad}} {locs['mean_value_loss']:.4f}\n"""
                           f"""{'Surrogate loss:':>{pad}} {locs['mean_surrogate_loss']:.4f}\n"""
+                          f"""{'Estimator loss:':>{pad}} {locs['mean_estimator_loss']:.4f}\n"""
                           f"""{'Mean action noise std:':>{pad}} {mean_std.item():.2f}\n""")
-
+                        #   f"""{'Mean reward/step:':>{pad}} {locs['mean_reward']:.2f}\n"""
+                        #   f"""{'Mean episode length/episode:':>{pad}} {locs['mean_trajectory_length']:.2f}\n""")
 
         log_string += f"""{'-' * width}\n"""
         log_string += ep_string
@@ -257,11 +314,14 @@ class OnPolicyRunner:
     def save(self, path, infos=None):
         state_dict = {
             'model_state_dict': self.alg.actor_critic.state_dict(),
-            'actor_state_dict': self.alg.actor_critic.actor.state_dict(),
+            'estimator_state_dict': self.alg.estimator.state_dict(),
             'optimizer_state_dict': self.alg.optimizer.state_dict(),
             'iter': self.current_learning_iteration,
             'infos': infos,
             }
+        # if self.if_depth:
+        #     state_dict['depth_encoder_state_dict'] = self.alg.depth_encoder.state_dict()
+        #     state_dict['depth_actor_state_dict'] = self.alg.depth_actor.state_dict()
         torch.save(state_dict, path)
 
     def load(self, path, load_optimizer=True):
@@ -270,18 +330,18 @@ class OnPolicyRunner:
         loaded_dict = torch.load(path, map_location=self.device)
         self.alg.actor_critic.load_state_dict(loaded_dict['model_state_dict'])
         self.alg.estimator.load_state_dict(loaded_dict['estimator_state_dict'])
-        if self.if_depth:
-            if 'depth_encoder_state_dict' not in loaded_dict:
-                warnings.warn("'depth_encoder_state_dict' key does not exist, not loading depth encoder...")
-            else:
-                print("Saved depth encoder detected, loading...")
-                self.alg.depth_encoder.load_state_dict(loaded_dict['depth_encoder_state_dict'])
-            if 'depth_actor_state_dict' in loaded_dict:
-                print("Saved depth actor detected, loading...")
-                self.alg.depth_actor.load_state_dict(loaded_dict['depth_actor_state_dict'])
-            else:
-                print("No saved depth actor, Copying actor critic actor to depth actor...")
-                self.alg.depth_actor.load_state_dict(self.alg.actor_critic.actor.state_dict())
+        # if self.if_depth:
+        #     if 'depth_encoder_state_dict' not in loaded_dict:
+        #         warnings.warn("'depth_encoder_state_dict' key does not exist, not loading depth encoder...")
+        #     else:
+        #         print("Saved depth encoder detected, loading...")
+        #         self.alg.depth_encoder.load_state_dict(loaded_dict['depth_encoder_state_dict'])
+        #     if 'depth_actor_state_dict' in loaded_dict:
+        #         print("Saved depth actor detected, loading...")
+        #         self.alg.depth_actor.load_state_dict(loaded_dict['depth_actor_state_dict'])
+        #     else:
+        #         print("No saved depth actor, Copying actor critic actor to depth actor...")
+        #         self.alg.depth_actor.load_state_dict(self.alg.actor_critic.actor.state_dict())
         if load_optimizer:
             self.alg.optimizer.load_state_dict(loaded_dict['optimizer_state_dict'])
         # self.current_learning_iteration = loaded_dict['iter']

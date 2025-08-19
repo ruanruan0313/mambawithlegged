@@ -15,7 +15,7 @@ class HistoryWrapper(gym.Wrapper):
         self.obs_history = torch.zeros(self.env.num_envs, self.obs_history_length, self.num_obs, dtype=torch.float,
                                        device=self.env.device, requires_grad=False)
         # 4维的历史扫描点
-        self.scandots_history = torch.zeros(self.env.num_envs, self.obs_history_length, self.num_height_points, dtype=torch.float,
+        self.scandots_history = torch.zeros(self.env.num_envs, self.obs_history_length, self.num_height_points + 12, dtype=torch.float,
                                        device=self.env.device, requires_grad=False)
         self.num_privileged_obs = self.num_privileged_obs
 
@@ -25,7 +25,11 @@ class HistoryWrapper(gym.Wrapper):
         # 为history_buffer添加动作延迟，减小sim2real的差距
         self.obs_history = torch.cat((self.obs_history[:, 1:], obs.unsqueeze(1)), dim=1)
         # print("obs history shape ",self.obs_history.shape)
-        self.scandots_history = torch.cat((self.scandots_history[:, 1:], scan.unsqueeze(1)), dim=1)
+        scan_with_obs = torch.cat((scan, obs[:, :12]), dim=-1)
+        self.scandots_history = torch.cat((self.scandots_history[:, 1:], scan_with_obs.unsqueeze(1)), dim=1)
+
+        # print("obs xyz : ", obs[:,:3])
+        # print("privileged_obs xyz : ", privileged_obs[:,:3])
         # print("scandots history shape ", self.scandots_history.shape)
         return {'obs': obs, 'privileged_obs': privileged_obs, 'obs_history': self.obs_history,
                 'scandots_history': self.scandots_history}, rew, done, info
@@ -34,8 +38,9 @@ class HistoryWrapper(gym.Wrapper):
         obs = self.env.get_observations()
         privileged_obs = self.env.get_privileged_observations()
         scandots = self.env.get_scandots()
+        scan_with_obs  = torch.cat((scandots, obs[:, :12]), dim=-1)
         self.obs_history = torch.cat((self.obs_history[:, 1:], obs.unsqueeze(1)), dim=1)
-        self.scandots_history = torch.cat((self.scandots_history[:, 1:], scandots.unsqueeze(1)), dim=1)
+        self.scandots_history = torch.cat((self.scandots_history[:, 1:], scan_with_obs.unsqueeze(1)), dim=1)
         return {'obs': obs, 'privileged_obs': privileged_obs,
                 'obs_history': self.obs_history,'scandots_history': self.scandots_history}
 
